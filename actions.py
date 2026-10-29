@@ -1037,6 +1037,9 @@ class Actions:
             (r"который час|сколько времени|сколько сейчас времени|время сейчас", self.time),
             (r"какое (сегодня )?число|какая (сегодня )?дата|какой сегодня день", self.date),
             (r"скриншот|скрин экрана|сделай скрин", self.screenshot),
+            (r"запиши\s+(?P<note_text>.+)", self.note_cmd),
+            (r"заметка\s*:\s*(?P<note_text>.+)", self.note_cmd),
+            (r"добавь заметку\s+(?P<note_text>.+)", self.note_cmd),
         ]
 
     def handle(self, cmd):
@@ -1857,6 +1860,27 @@ class Actions:
         else:
             open(path, "x", encoding="utf-8").close()  # пустые .docx/.xlsx Office открывает как новые
         return Reply(line("created", t=os.path.basename(path), where=place_name))
+
+    def note_cmd(self, c, m):
+        """«Капри, запиши: купить молоко» или «Капри, заметка: идея для проекта»."""
+        text = m.group("note_text") if m.group("note_text") else ""
+        text = text.strip()
+        
+        if not text:
+            return Reply("Что записать, шеф?")
+        
+        notes_file = os.path.join(os.path.expanduser("~"), "Documents", "capri_notes.txt")
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%d.%m.%Y %H:%M")
+        
+        if not os.path.exists(notes_file) or os.path.getsize(notes_file) == 0:
+            with open(notes_file, "w", encoding="utf-8") as f:
+                f.write("=== ЗАМЕТКИ КАПРИ ===\n\n")
+        
+        with open(notes_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {text}\n")
+        
+        return Reply(f"Записала: {text}")
 
     def images(self, c, m):
         q = m.group("q").strip()
