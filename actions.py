@@ -1043,6 +1043,9 @@ class Actions:
             (r"(?:какая\s+)?погода(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
             (r"покажи\s+погоду(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
             (r"прогноз\s+погоды(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
+            (r"переведи\s+['\"]?(?P<translate_text>[^'\"]+)['\"]?\s*(?:на\s+(?:русский|английский)|по-(?:русски|английски))?", self.translate_cmd),
+            (r"как\s+(?:будет|сказать)\s+['\"]?(?P<translate_text>[^'\"]+)['\"]?\s*(?:на\s+(?:русский|английский)|по-(?:русски|английски))?", self.translate_cmd),
+            (r"перевод\s+['\"]?(?P<translate_text>[^'\"]+)['\"]?", self.translate_cmd),
         ]
 
     def handle(self, cmd):
@@ -1905,6 +1908,42 @@ class Actions:
             return Reply(f"Погода: {weather_text}")
         except Exception:
             return Reply("Не смогла получить погоду, шеф. Проверь интернет.")
+
+    def translate_cmd(self, c, m):
+        """«Капри, переведи 'ubiquitous' на русский» или «Капри, как будет 'привет' по-английски»."""
+        import requests
+        import urllib.parse
+        
+        # Извлекаем текст для перевода
+        text = m.group("translate_text") if m.group("translate_text") else ""
+        text = text.strip().strip("'\"")
+        
+        if not text:
+            return Reply("Что перевести, шеф?")
+        
+        # Определяем целевой язык (по умолчанию — русский)
+        target_lang = "ru"
+        if re.search(r"(на\s+английский|по-английски|in\s+english)", c, re.IGNORECASE):
+            target_lang = "en"
+        
+        # Исходный язык (если переводим на русский — значит исходный английский, и наоборот)
+        source_lang = "en" if target_lang == "ru" else "ru"
+        
+        # Запрос к бесплатному API MyMemory
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair={source_lang}|{target_lang}"
+        
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data["responseStatus"] == 200:
+                translated = data["responseData"]["translatedText"]
+                return Reply(f"Перевод: {translated}")
+            else:
+                return Reply("Не смогла перевести, шеф.")
+        except Exception:
+            return Reply("Ошибка перевода. Проверь интернет.")
 
     def images(self, c, m):
         q = m.group("q").strip()
