@@ -1040,6 +1040,9 @@ class Actions:
             (r"запиши\s+(?P<note_text>.+)", self.note_cmd),
             (r"заметка\s*:\s*(?P<note_text>.+)", self.note_cmd),
             (r"добавь заметку\s+(?P<note_text>.+)", self.note_cmd),
+            (r"(?:какая\s+)?погода(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
+            (r"покажи\s+погоду(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
+            (r"прогноз\s+погоды(?:\s+(?:в|во|город)\s+[а-яёa-z\-]+)?", self.weather_cmd),
         ]
 
     def handle(self, cmd):
@@ -1881,6 +1884,27 @@ class Actions:
             f.write(f"[{timestamp}] {text}\n")
         
         return Reply(f"Записала: {text}")
+
+    def weather_cmd(self, c, m):
+        """«Капри, какая погода?» или «Капри, погода в Питере»."""
+        import requests
+        
+        # Пытаемся извлечь город из фразы
+        city = "Moscow"  # По умолчанию
+        city_match = re.search(r"(?:в|во|город)\s+([а-яёa-z\-]+)", c, re.IGNORECASE)
+        if city_match:
+            city = city_match.group(1)
+        
+        # Запрос к бесплатному API wttr.in
+        url = f"https://wttr.in/{city}?format=%C,+%t,+влажность+%h,+ветер+%w&lang=ru"
+        
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            weather_text = response.text.strip()
+            return Reply(f"Погода: {weather_text}")
+        except Exception:
+            return Reply("Не смогла получить погоду, шеф. Проверь интернет.")
 
     def images(self, c, m):
         q = m.group("q").strip()
