@@ -1,0 +1,51 @@
+name: Build Flet APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install GTK libraries
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+
+      - name: Install Flet
+        run: pip install flet
+
+      - name: Setup Flutter 3.47.9
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: 'stable'
+
+      - name: Accept Android licenses
+        run: yes | flutter doctor --android-licenses || true
+
+      - name: Build APK
+        run: flet build apk
+
+      - name: Find APK file
+        run: |
+          echo "Searching for APK files..."
+          find . -name "*.apk" -type f
+          echo "Found APK files:"
+          find . -name "*.apk" -type f -exec ls -lh {} \;
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: capricorn-app-release
+          path: |
+            **/*.apk
+          if-no-files-found: error

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import requests
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -727,6 +728,27 @@ def tray_icon():
     p.end()
     return QIcon(pm)
 
+def phone_command_poller(capri_instance):
+    """Фоновая проверка команд от телефона"""
+    print("📱 Фоновая проверка команд от телефона запущена")
+    while True:
+        try:
+            # Запрашиваем новую команду из очереди сервера
+            response = requests.get("http://127.0.0.1:5000/queue", timeout=2)
+            data = response.json()
+            
+            if data.get("command"):
+                cmd = data["command"]
+                print(f"📱 Выполняю команду с телефона: {cmd}")
+                # Используем встроенный метод Капри для обработки текста!
+                capri_instance.text_command(cmd)
+                
+        except requests.exceptions.ConnectionError:
+            pass  # Сервер выключен, просто пропускаем, Капри не упадет
+        except Exception as e:
+            print(f"❌ Ошибка проверки команд: {e}")
+        
+        time.sleep(1)  # Проверяем каждую секунду для мгновенной реакции
 
 def main():
     app = QApplication(sys.argv)
@@ -878,6 +900,12 @@ def main():
     avatar.menu_requested.connect(lambda pos: menu.popup(pos))
 
     capri.start()
+    capri.start()
+    
+    # 📱 ДОБАВЬ ЭТИ ДВЕ СТРОКИ:
+    threading.Thread(target=phone_command_poller, args=(capri,), daemon=True).start()
+    
+    
     sys.exit(app.exec())
 
 
