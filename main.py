@@ -2,6 +2,7 @@
 Запуск: run.bat (или pythonw main.py)."""
 import json
 import logging
+import math
 import os
 import queue
 import random
@@ -21,7 +22,6 @@ logging.basicConfig(filename=os.path.join(BASE, "capri.log"), level=logging.INFO
 log = logging.getLogger("capri")
 log.info("Python %s", sys.version.split()[0])
 
-
 def fatal(text):
     """Капри запускается без окна консоли, поэтому о том, что не так, говорим окном Windows."""
     log.error(text)
@@ -32,12 +32,11 @@ def fatal(text):
         pass
     sys.exit(1)
 
-
 try:
-    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, Signal, QTimer, QPointF
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
-    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QSlider,
-                                   QSystemTrayIcon, QWidget, QWidgetAction)
+    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox,
+                                   QSlider, QSystemTrayIcon, QWidget, QWidgetAction)
 
     from actions import CAPRI_URL, Actions, Reply
     from ai import AI
@@ -50,8 +49,18 @@ try:
 except ImportError as e:
     log.exception("Не хватает библиотек")
     fatal(f"Не установлены нужные библиотеки ({e.name or e}).\n\n"
-          f"Запусти setup.bat в папке Капри и дождись надписи «Готово», потом снова run.bat.\n"
+          f"Запусти setup.bat в папке Капри и дождись надписи «Готово», потом снова run.bat.\n\n"
           f"Если setup.bat выдаёт ошибку — сфотографируй его окно.\n\nPython {sys.version.split()[0]}")
+
+try:
+    import remote_server as remote
+except ImportError:
+    remote = None   # Flask не установлен — сервер для телефона недоступен (запусти setup.bat)
+
+try:
+    from scheduler import Scheduler
+except ImportError:
+    Scheduler = None   # scheduler.py не найден — напоминания и таймеры недоступны
 
 DEFAULTS = {
     "enable_ai": False,
@@ -65,19 +74,21 @@ DEFAULTS = {
     "roam_chance": 0.5,
     "teleport_on_answer": True,
     "search_when_unsure": True,
-    "voice_volume": 100,     # громкость голоса Капри 0..100 (общая громкость Windows не меняется)
-    "mic_gain": 1.0,         # громкость микрофона для Капри: 1 — как есть, 2 — вдвое громче
-    "mic_sensitivity": 100,  # 100 — слышит всё; меньше — тихий шум и фон отбрасываются
-    "user_name_mode": "none",  # как называть пользователя: "custom" — user_name, "windows" — имя пользователя
-                               # Windows, "pc" — имя компьютера, "none" — не называть
+    "voice_volume": 100,
+    "mic_gain": 1.0,
+    "mic_sensitivity": 100,
+    "user_name_mode": "none",
     "user_name": "",
-    "user_gender": "male",     # "male" / "female" — в каком роде Капри к тебе обращается
+    "user_gender": "male",
     "browser": "",
-    "replies": {},           # свои ответы: {"фраза": "что ответит Капри"} — проверяются раньше команд и нейросети  # в каком браузере открывать сайты: "хром", "яндекс", "опера"… или путь к exe; "" — как в Windows
+    "replies": {},
     "anthropic_api_key": "",
     "model": "claude-opus-5-5",
     "wake_words": ["капри", "каприз", "капре", "кепри", "капли"],
     "use_google_stt": True,
+    "remote_enabled": True,
+    "remote_port": 5000,
+    "remote_token": "",
     "voice": "ru-RU-SvetlanaNeural",
     "tts_engine": "edge",
     "voice_rate": "+10%",
@@ -89,6 +100,7 @@ DEFAULTS = {
     "followup_seconds": 6,
     "hide_after_seconds": 12,
     "greet_on_start": True,
+    "shadow_mode": False,   # «работа из тени»: молча и невидимо, с индикатором
     "vosk_model": "models/vosk-model-small-ru-0.22",
     "sites": {
         "ютуб": "https://www.youtube.com", "youtube": "https://www.youtube.com",
@@ -121,7 +133,6 @@ DEFAULTS = {
     }
 }
 
-
 def _config_blank():
     """config.json нет или он пустой (всё стёрли) — такой можно спокойно создать заново."""
     try:
@@ -130,7 +141,6 @@ def _config_blank():
     except FileNotFoundError:
         return True
 
-
 def _edit_config(change):
     """Прочитать config.json, применить change(data) и записать. Файл с ошибкой не перезаписываем —
     иначе пропадут правки пользователя. Возвращает текст ошибки или None."""
@@ -138,7 +148,7 @@ def _edit_config(change):
         if _config_blank():
             data = {}
         else:
-            with open(CONFIG_PATH, encoding="utf-8-sig") as f:  # Блокнот иногда сохраняет с BOM
+            with open(CONFIG_PATH, encoding="utf-8-sig") as f:
                 data = json.load(f)
     except Exception:
         log.exception("config.json с ошибкой, не записываю")
@@ -148,11 +158,9 @@ def _edit_config(change):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return None
 
-
 def save_setting(key, value):
     """Записать одну настройку в config.json, не трогая остальные."""
     _edit_config(lambda data: data.__setitem__(key, value))
-
 
 def save_entry(section, name, value):
     """Свой сайт или программа: section "sites"/"apps". value=None — убрать; встроенные записи
@@ -165,7 +173,6 @@ def save_entry(section, name, value):
             entries[name] = value
     return _edit_config(change)
 
-
 def user_display_name(cfg):
     """Как Капри называет пользователя — по настройке user_name_mode."""
     mode = cfg.get("user_name_mode", "none")
@@ -177,13 +184,10 @@ def user_display_name(cfg):
         return os.environ.get("COMPUTERNAME", "")
     return ""
 
-
 def apply_user(cfg):
     set_user(user_display_name(cfg), cfg.get("user_gender", "male"))
 
-
-CONFIG_ERROR = ""  # что сказать вслух, если config.json не прочитался
-
+CONFIG_ERROR = ""
 
 def load_config():
     global CONFIG_ERROR
@@ -195,7 +199,7 @@ def load_config():
                 user = json.load(f)
             for k, v in user.items():
                 if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                    for name, value in v.items():  # null — убранная встроенная запись
+                    for name, value in v.items():
                         if value is None:
                             cfg[k].pop(name, None)
                         else:
@@ -203,7 +207,7 @@ def load_config():
                 else:
                     cfg[k] = v
             missing = [k for k in DEFAULTS if k not in user]
-            if missing:  # файл неполный (его создал setup_ai.bat или он из старой версии) — дописываем
+            if missing:
                 _edit_config(lambda data: [data.setdefault(k, DEFAULTS[k]) for k in missing])
                 log.info("В config.json добавлены недостающие настройки: %s", ", ".join(missing))
         except json.JSONDecodeError as e:
@@ -214,16 +218,126 @@ def load_config():
         except Exception:
             log.exception("config.json не прочитался, использую настройки по умолчанию")
             CONFIG_ERROR = "Не смогла прочитать config.json, работаю со стандартными настройками."
-    else:  # файла нет или его содержимое стёрли — создаём заново со стандартными настройками
+    else:
         log.info("config.json пустой или удалён, создаю заново")
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(DEFAULTS, f, ensure_ascii=False, indent=2)
     return cfg
 
-
 STOP_RE = re.compile(r"\b(стоп|хватит|молчи|замолчи|помолчи|достаточно|подожди|остановись|перестань|"
                      r"заткнись|умолкни)\b")
 
+
+def island_voice(island, cmd):
+    """Голосовое управление островом: скрыть/показать/развернуть/свернуть/текст песни."""
+    c = cmd.lower()
+    if re.search(r"(покажи|включи|открой)", c) and re.search(r"(текст песни|слова песни|лирик)", c):
+        island._lyrics_on = True
+        island._expanded = True
+        island._glitch = 0.25
+        return "Включаю текст песни."
+    if not re.search(r"\bостров", c):
+        return None
+    if re.search(r"(скрой|убери|спрячь|выключи|отключи)", c):
+        island.apply_setting("enabled", False)
+        return "Скрываю остров. Скажи «покажи остров», чтобы вернуть."
+    if re.search(r"(покажи|верни|включи|показывай|где)", c):
+        island.apply_setting("enabled", True)
+        return "Вот он."
+    if re.search(r"(разверни|раскрой)", c):
+        island._lyrics_on = False
+        island._expanded = True
+        return "Разворачиваю."
+    if re.search(r"(сверни|закрой|сложи)", c):
+        island._lyrics_on = False
+        island._expanded = False
+        return "Сворачиваю."
+    if re.search(r"(закрепи|не сворачивай)", c):
+        island._pinned = not island._pinned
+        return "Закрепила." if island._pinned else "Открепила."
+    if re.search(r"(текст|слова)", c):
+        island.toggle_lyrics()
+        return "Текст песни. Клик по строке перематывает."
+    return None
+
+
+SHADOW_ON_RE = re.compile(r"(работай из тени|режим тени|уходи? в тень|тихий режим|невидимый режим|"
+                          r"стань невидим\w*|спрячься и молчи|молча работай)")
+SHADOW_OFF_RE = re.compile(r"(выйди из тени|выходи из тени|вернись из тени|обычный режим|видимый режим|"
+                           r"перестань прятаться|снова показывайся|говори как обычно|не молчи|говори снова|"
+                           r"отвечай голосом|вернись как было|верни голос|перестань молчать)")
+
+
+def shadow_voice(capri, cmd):
+    """Режим тени: команды выполняются молча, остров живёт своей жизнью."""
+    c = cmd.lower()
+    if SHADOW_ON_RE.search(c):
+        capri.set_shadow(True)
+        return "Ухожу в тень. Команды слышу, отвечаю молча."
+    if SHADOW_OFF_RE.search(c):
+        capri.set_shadow(False)
+        return "Выхожу из тени — снова в строю."
+    return None
+
+
+class ShadowIndicator(QWidget):
+    """Точка у верхнего правого угла: пульсирует — слушает, мигает — выполняет.
+    Клик по точке — выйти из режима тени.
+    Потокобезопасна: состояние меняется через сигнал _req, из любого потока."""
+
+    _req = Signal(str)
+    on_click = None
+
+    def __init__(self):
+        super().__init__()
+        self.state = "idle"
+        self._t0 = time.time()
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setFixedSize(22, 22)
+        self._req.connect(self._apply)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(lambda: self.update() if self.isVisible() else None)
+        self._timer.start(40)
+        self.hide()
+
+    def set_state(self, state):
+        self._req.emit(state)
+
+    def _apply(self, state):
+        self.state = state
+        if state == "idle":
+            self.hide()
+        else:
+            scr = QApplication.primaryScreen().availableGeometry()
+            self.move(scr.right() - 40, scr.top() + 14)
+            self.show()
+            self.raise_()
+
+    def mousePressEvent(self, e):
+        if callable(self.on_click):
+            self.on_click()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        t = time.time() - self._t0
+        cx = cy = 11
+        if self.state == "listening":
+            k = 0.5 + 0.5 * math.sin(t * 6)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 34, 96, int(40 + 60 * k)))
+            p.drawEllipse(QPointF(cx, cy), 7 + 2.5 * k, 7 + 2.5 * k)
+            p.setBrush(QColor(255, 34, 96))
+            p.drawEllipse(QPointF(cx, cy), 4.5, 4.5)
+        elif self.state == "thinking":
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 176, 46, 170))
+            for i in range(3):
+                a = t * 5 + i * 2.094
+                p.drawEllipse(QPointF(cx + 5.5 * math.cos(a), cy + 5.5 * math.sin(a)), 2.4, 2.4)
+        p.end()
 
 def fullscreen_app_active():
     """Открыта игра или видео на весь экран — тогда не лезем со спонтанными репликами."""
@@ -237,13 +351,12 @@ def fullscreen_app_active():
         cls = ctypes.create_unicode_buffer(64)
         u.GetClassNameW(hwnd, cls, 64)
         if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
-            return False  # рабочий стол
+            return False
         r = wintypes.RECT()
         u.GetWindowRect(hwnd, ctypes.byref(r))
         return (r.right - r.left) >= u.GetSystemMetrics(0) and (r.bottom - r.top) >= u.GetSystemMetrics(1)
     except Exception:
         return False
-
 
 class Capri(QObject):
     summon = Signal()
@@ -268,10 +381,13 @@ class Capri(QObject):
             self.local.on_model_change = self._remember_model
         self.actions = Actions(cfg, BASE, self.ai, save=save_entry)
         self.config_mtime = self._config_mtime()
-        self.zapret_checked = False  # предлагали ли уже исправить zapret в этом сеансе
+        self.zapret_checked = False
         self.actions.local = self.local
         self.speaker = Speaker(cfg)
         self.jobs = queue.Queue()
+        self.sched = Scheduler(BASE, lambda text: self.jobs.put(("say", text))) if Scheduler else None
+        self.shadow = bool(cfg.get("shadow_mode"))
+        self.indicator = None
         self.awake_until = 0.0
         self.last_partial_wake = 0.0
         self.speaking = False
@@ -291,7 +407,7 @@ class Capri(QObject):
         threading.Thread(target=self._worker, daemon=True).start()
         if self.local:
             threading.Thread(target=self.local.start_server, daemon=True).start()
-        model =os.path.join(BASE, self.cfg["vosk_model"])
+        model = os.path.join(BASE, self.cfg["vosk_model"])
         if os.path.isdir(model):
             self.listener = Listener(model, self.on_final, self.on_partial, self.on_listener_error,
                                      device_name=self.cfg.get("mic_device") or None,
@@ -301,22 +417,31 @@ class Capri(QObject):
         else:
             self.jobs.put(("say", line("no_model")))
             return
-        # вступление: анимация capri + приветствие
         self.jobs.put(("say", line("greet") if self.cfg.get("greet_on_start") else "", "capri"))
         if CONFIG_ERROR:
             self.jobs.put(("say", CONFIG_ERROR))
-        threading.Thread(target=self._chatter_loop, daemon=True).start()  # сам проверяет, включено ли
+        threading.Thread(target=self._chatter_loop, daemon=True).start()
         threading.Thread(target=self._prewarm_voice, daemon=True).start()
 
     def _prewarm_voice(self):
-        """Через полминуты после запуска озвучиваем в фоне постоянные фразы и свои ответы — потом они
-        звучат сразу, без ожидания сервера Microsoft."""
-        time.sleep(30)
+        time.sleep(45)
+        for _ in range(90):
+            if not self.speaking and self.jobs.empty():
+                break
+            time.sleep(2)
+        if getattr(self.speaker, "edge_error", None):
+            log.info("Голос Microsoft недоступен — предозвучку фраз пропускаю")
+            return
         static = [gendered(t) for variants in LINES.values() for t in variants if "{" not in t]
         static += list(self.cfg.get("replies", {}).values())
-        self.speaker.prewarm(static)
+        for i in range(0, len(static), 5):
+            if getattr(self.speaker, "edge_error", None):
+                log.info("Голос Microsoft отвалился — останавливаю предозвучку")
+                return
+            while self.speaking or not self.jobs.empty():
+                time.sleep(1)
+            self.speaker.prewarm(static[i:i + 5])
 
-    # ----- спонтанные появления -----
     def _chatter_loop(self):
         def next_delay():
             lo, hi = self.cfg["chatter_min_minutes"], self.cfg["chatter_max_minutes"]
@@ -325,17 +450,17 @@ class Capri(QObject):
         while True:
             time.sleep(15)
             now = time.time()
-            if not self.cfg.get("chatter"):  # выключено галочкой в трее — ждём, отсчёт начнётся заново
+            if not self.cfg.get("chatter"):
                 due = now + next_delay()
                 continue
             if now < due:
                 continue
             quiet = now - self.last_activity > 120 and self.jobs.empty() and not self.speaking
-            if quiet and not fullscreen_app_active():
+            if quiet and not fullscreen_app_active() and not self.shadow:
                 self.jobs.put(("chatter",))
                 due = now + next_delay()
             else:
-                due = now + 60  # занят или в игре/фильме — попробуем позже
+                due = now + 60
 
     def chatter_line(self):
         hour = time.localtime().tm_hour
@@ -353,7 +478,6 @@ class Capri(QObject):
         self.recent_chatter = (self.recent_chatter + [text])[-6:]
         return text
 
-    # ----- события микрофона (поток слушателя) -----
     def has_wake(self, text):
         return bool(self.wake_re.search(text.lower()))
 
@@ -363,19 +487,21 @@ class Capri(QObject):
         for last in self.wake_re.finditer(t):
             pass
         if last and t[last.end():].strip(" ,.!?"):
-            t = t[last.end():]  # берём то, что сказано после имени (до него могло быть эхо)
+            t = t[last.end():]
         t = self.wake_re.sub(" ", t)
         return re.sub(r"^[\s,.!?]+|[\s,.!?]+$", "", t)
 
     def appear(self, seconds):
+        if self.shadow:
+            if self.indicator:
+                self.indicator.set_state("listening")
+            return
         if self.glitch_wav:
             play_sound_async(self.glitch_wav)
         self.summon.emit()
         self.mode.emit("listening", float(seconds))
 
-    # ----- перебивание -----
     def is_echo(self, text):
-        """Микрофон слышит голос самой Капри: все слова фразы есть в том, что она говорит."""
         words = text.lower().replace("ё", "е").split()
         return bool(words) and all(w in self.speech_words for w in words)
 
@@ -406,13 +532,12 @@ class Capri(QObject):
     def on_final(self, text, audio):
         now = time.time()
         if self.actions.autoscroll_active() and STOP_RE.search(text.lower()) and not self.is_echo(text):
-            # во время автопрокрутки «стоп» слышим и без имени
             self.actions.stop_background()
             self.subtitle.emit(line("scroll_stop"))
             return
         if self.speaking and not self.interrupted:
             if not (self.cfg.get("barge_in") and self.wants_interrupt(text)):
-                return  # эхо собственной речи
+                return
             self.interrupt()
         if now - self.speech_end < 1.0 and self.is_echo(text):
             return
@@ -421,7 +546,6 @@ class Capri(QObject):
             return
         cmd = self.strip_wake(text) if woke else text
         if STOP_RE.match(cmd.strip()) and len(cmd.split()) <= 3:
-            # «Капри, стоп» — замолчать, остановить автопрокрутку и слушать дальше
             self.awake_until = now + self.cfg["listen_window_seconds"]
             if self.actions.stop_background():
                 self.subtitle.emit(line("scroll_stop"))
@@ -439,7 +563,6 @@ class Capri(QObject):
         self.jobs.put(("say", line("model_broken" if kind == "model" else "no_mic")))
 
     def set_profile(self, mode, name, gender):
-        """«Как ко мне обращаться…»: как называть пользователя и в каком роде. Сразу и запоминается."""
         for key, value in (("user_name_mode", mode), ("user_name", name), ("user_gender", gender)):
             self.cfg[key] = value
             save_setting(key, value)
@@ -447,23 +570,52 @@ class Capri(QObject):
         log.info("Обращение: %s, %s", user_display_name(self.cfg) or "без имени", gender)
 
     def set_chatter(self, on):
-        """Галочка в трее: появляется ли Капри сама (поболтать, погулять по экрану). Сразу и запоминается."""
         self.cfg["chatter"] = bool(on)
         save_setting("chatter", bool(on))
         log.info("Самостоятельные появления: %s", "включены" if on else "выключены")
 
     def set_search_when_unsure(self, on):
-        """Галочка в трее: открывать ли Google, когда Капри не знает ответа. Сразу и запоминается."""
         self.cfg["search_when_unsure"] = bool(on)
         save_setting("search_when_unsure", bool(on))
         log.info("Поиск в браузере, если не знаю: %s", "включён" if on else "выключен")
 
+    def start_remote(self):
+        if not remote:
+            log.info("Flask не установлен — сервер для телефона недоступен (запусти setup.bat)")
+            return
+        if not self.cfg.get("remote_token"):
+            import secrets
+            self.cfg["remote_token"] = secrets.token_urlsafe(16)
+            save_setting("remote_token", self.cfg["remote_token"])
+        remote.start(self, self.cfg["remote_token"], int(self.cfg.get("remote_port", 5000)))
+
+    def set_remote(self, on):
+        self.cfg["remote_enabled"] = bool(on)
+        save_setting("remote_enabled", bool(on))
+        if on:
+            self.start_remote()
+        elif remote:
+            remote.stop()
+
+    # ----- режим тени -----
+    def set_shadow(self, on):
+        """«Работа из тени»: работает молча, аватар скрыт, остров не трогаем."""
+        self.shadow = bool(on)
+        save_setting("shadow_mode", self.shadow)
+        if self.speaking:
+            self.interrupt()
+        if self.shadow:
+            self.vanish.emit()
+            if self.indicator:
+                self.indicator.set_state("idle")
+        else:
+            self.summon.emit()
+        log.info("Режим тени: %s", "включён" if self.shadow else "выключен")
+
     def _remember_model(self, name):
-        """Ollama нашла другую скачанную модель — записываем её, чтобы не искать при каждом запуске."""
         self.cfg["local_model"] = name
         save_setting("local_model", name)
 
-    # ----- config.json на лету -----
     @staticmethod
     def _config_mtime():
         try:
@@ -472,13 +624,11 @@ class Capri(QObject):
             return None
 
     def reload_config_if_changed(self, speak=True):
-        """Правки config.json (сайты, программы, названия) подхватываются без перезапуска.
-        speak=False — из окна в трее: там говорить нельзя (речь блокирует окно)."""
         mtime = self._config_mtime()
         if mtime == self.config_mtime:
             return
         fresh = load_config()
-        if CONFIG_ERROR:  # с ошибкой — работаем как было и говорим, где ошибка
+        if CONFIG_ERROR:
             if speak:
                 self.config_mtime = mtime
                 self.say(CONFIG_ERROR)
@@ -491,15 +641,12 @@ class Capri(QObject):
         apply_user(self.cfg)
         log.info("config.json перечитан")
 
-    # ----- кнопки -----
-    # ----- микрофон -----
     def current_mic(self):
         if self.listener and self.listener.active_name:
             return self.listener.active_name
         return self.cfg.get("mic_device") or default_input_name()
 
     def set_mic(self, name, announce=True):
-        """Сменить устройство ввода на ходу и запомнить выбор (None — как в Windows по умолчанию)."""
         self.cfg["mic_device"] = name
         save_setting("mic_device", name)
         if self.listener:
@@ -509,7 +656,6 @@ class Capri(QObject):
             self.jobs.put(("say", line("mic_set", t=name or "микрофон Windows по умолчанию")))
 
     def set_mic_tuning(self, gain=None, sensitivity=None):
-        """Громкость ввода и чувствительность микрофона для Капри — сразу и запоминаются."""
         if gain is not None:
             self.cfg["mic_gain"] = round(float(gain), 2)
             save_setting("mic_gain", self.cfg["mic_gain"])
@@ -522,13 +668,11 @@ class Capri(QObject):
                 self.listener.sensitivity = self.cfg["mic_sensitivity"]
 
     def set_voice_fx(self, strength):
-        """Сила цифровых эффектов голоса: 0 — чистый голос, 1.8 — как задумано, больше — сильнее."""
         self.speaker.fx = round(float(strength), 2)
         self.cfg["voice_fx"] = self.speaker.fx
         save_setting("voice_fx", self.speaker.fx)
 
     def set_voice_volume(self, volume):
-        """Громкость голоса Капри 0..100 — только её, общая громкость Windows не меняется."""
         self.speaker.volume = int(volume)
         self.cfg["voice_volume"] = int(volume)
         save_setting("voice_volume", int(volume))
@@ -558,11 +702,10 @@ class Capri(QObject):
         self.appear(self.cfg["listen_window_seconds"])
         self.subtitle.emit(line("listen"))
 
-    def text_command(self, text):
+    def text_command(self, text, cmd_id=None):
         self.summon.emit()
-        self.jobs.put(("text", text))
+        self.jobs.put(("text", text, cmd_id))
 
-    # ----- рабочий поток -----
     def _worker(self):
         try:
             import comtypes
@@ -575,6 +718,8 @@ class Capri(QObject):
                 self._process(job)
             except Exception:
                 log.exception("Ошибка обработки %s", job[0])
+                if job[0] == "text" and len(job) > 2 and job[2] and remote:
+                    remote.publish_result(job[2], line("crash"))
                 self.say(line("crash"))
 
     def _process(self, job):
@@ -582,7 +727,7 @@ class Capri(QObject):
         if kind == "chatter":
             text = self.chatter_line()
             if random.random() < self.cfg.get("roam_chance", 0.5):
-                self.roam.emit()          # гуляет по экрану, окно с текстом сверху
+                self.roam.emit()
                 time.sleep(1.5)
             else:
                 self.summon.emit()
@@ -600,6 +745,7 @@ class Capri(QObject):
             if not self.say(job[1]):
                 self.mode.emit("idle", 0.0)
             return
+        cmd_id = None
         if kind == "voice":
             _, cmd, audio, woke = job
             self.summon.emit()
@@ -613,14 +759,15 @@ class Capri(QObject):
                         cmd = better
         else:
             cmd = job[1]
+            cmd_id = job[2] if len(job) > 2 else None
         if self.has_wake(cmd):
-            # имя могло остаться в тексте («капри нажми …»), если Капри уже слушала без него
             stripped = self.strip_wake(cmd)
             if len(stripped) < 2:
-                # просто позвали по имени — не болтаем, а слушаем
                 self.awake_until = time.time() + self.cfg["listen_window_seconds"]
                 self.mode.emit("listening", float(self.cfg["listen_window_seconds"]))
                 self.subtitle.emit(line("listen"))
+                if cmd_id and remote:
+                    remote.publish_result(cmd_id, line("listen"))
                 return
             cmd = stripped
         log.info("Команда: %s", cmd)
@@ -628,7 +775,25 @@ class Capri(QObject):
         self.subtitle.emit("> " + cmd)
         self.reload_config_if_changed()
 
-        reply = self.actions.handle(cmd)
+        reply = None
+        if self.sched:
+            stext = self.sched.handle(cmd)
+            if stext is not None:
+                reply = Reply(stext)
+        if reply is None:
+            st = shadow_voice(self, cmd)
+            if st is not None:
+                reply = Reply(st)
+        if self.shadow and self.indicator and reply is None and cmd_id is None:
+            self.indicator.set_state("thinking")
+        if reply is None:
+            isl = getattr(self, "island", None)
+            if isl is not None:
+                st = island_voice(isl, cmd)
+                if st is not None:
+                    reply = Reply(st)
+        if reply is None:
+            reply = self.actions.handle(cmd)
         if reply is not None and reply.action in ("mic_info", "mic_next"):
             reply = self.mic_command(reply.action)
         if reply is None:
@@ -637,8 +802,10 @@ class Capri(QObject):
             else:
                 answer = self.local.ask(cmd) if self.local else None
                 reply = Reply(answer, "answer") if answer else self.actions.fallback(cmd, force_search=bool(self.local))
+        if cmd_id and remote:
+            remote.publish_result(cmd_id, reply.text)
         if reply.action == "answer" and self.cfg.get("teleport_on_answer"):
-            self.hop.emit()  # отвечает, скача по экрану красной молнией
+            self.hop.emit()
         if reply.action == "wave":
             self.anim.emit("capri")
         elif reply.action and reply.action.startswith("move:"):
@@ -648,8 +815,10 @@ class Capri(QObject):
             time.sleep(0.8)
             self.roam.emit()
             time.sleep(1.5)
+        if self.shadow and self.indicator:
+            self.indicator.set_state("idle")
         if self.say(reply.text):
-            return  # перебили — уже слушаем новую команду
+            return
 
         if reply.action == "quit":
             self.quit_app.emit()
@@ -661,8 +830,11 @@ class Capri(QObject):
             self.mode.emit("listening", follow)
 
     def say(self, text):
-        """Озвучивает текст. Возвращает True, если Капри перебили."""
         log.info("Капри: %s", text)
+        if self.shadow:
+            if self.indicator:
+                self.indicator.set_state("idle")
+            return False
         self.subtitle.emit(text)
         self.mode.emit("speaking", 0.0)
         barge_in = self.cfg.get("barge_in") and self.listener
@@ -677,7 +849,7 @@ class Capri(QObject):
             self.speaking = False
             self.speech_end = time.time()
             if barge_in and not self.interrupted:
-                self.listener.reset_req.set()  # выбрасываем эхо её голоса
+                self.listener.reset_req.set()
             if self.listener and not barge_in:
                 time.sleep(0.25)
                 self.listener.muted.clear()
@@ -685,8 +857,6 @@ class Capri(QObject):
         return self.interrupted
 
     def _check_voice_blocked(self):
-        """Голос Microsoft не прошёл из-за сети, а запущен zapret — один раз за сеанс объясняем
-        и предлагаем добавить сервер голоса в исключения zapret."""
         err = self.speaker.edge_error
         if self.zapret_checked or not err or not zapret.NETWORK_ERROR.search(err) or not zapret.running():
             return
@@ -700,7 +870,7 @@ class Capri(QObject):
         else:
             def fix():
                 try:
-                    for lst in todo:  # во все найденные копии zapret — какая из них запущена, не видно
+                    for lst in todo:
                         zapret.add_exclude(lst)
                         log.info("Сервер голоса добавлен в исключения zapret (имя и адреса): %s", lst)
                 except OSError as e:
@@ -708,9 +878,8 @@ class Capri(QObject):
                     return Reply(line("zapret_fail", e=e))
                 return Reply(line("zapret_fixed"))
             self.actions.pending = fix
-            self.awake_until = time.time() + 20  # ответ «да» без имени
+            self.awake_until = time.time() + 20
             self.jobs.put(("say", line("zapret_offer")))
-
 
 def tray_icon():
     pm = QPixmap(64, 64)
@@ -728,28 +897,6 @@ def tray_icon():
     p.end()
     return QIcon(pm)
 
-def phone_command_poller(capri_instance):
-    """Фоновая проверка команд от телефона"""
-    print("📱 Фоновая проверка команд от телефона запущена")
-    while True:
-        try:
-            # Запрашиваем новую команду из очереди сервера
-            response = requests.get("http://127.0.0.1:5000/queue", timeout=2)
-            data = response.json()
-            
-            if data.get("command"):
-                cmd = data["command"]
-                print(f"📱 Выполняю команду с телефона: {cmd}")
-                # Используем встроенный метод Капри для обработки текста!
-                capri_instance.text_command(cmd)
-                
-        except requests.exceptions.ConnectionError:
-            pass  # Сервер выключен, просто пропускаем, Капри не упадет
-        except Exception as e:
-            print(f"❌ Ошибка проверки команд: {e}")
-        
-        time.sleep(1)  # Проверяем каждую секунду для мгновенной реакции
-
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -759,7 +906,12 @@ def main():
     avatar.hide_after = float(cfg["hide_after_seconds"])
     apply_user(cfg)
     capri = Capri(cfg)
-    capri.summon.connect(avatar.summon)
+
+    # индикатор режима тени: создаём здесь, привязываем клик — выход из тени
+    capri.indicator = ShadowIndicator()
+    capri.indicator.on_click = lambda: capri.set_shadow(False)
+
+    capri.summon.connect(lambda: None if capri.shadow else avatar.summon())
     capri.vanish.connect(avatar.vanish)
     capri.mode.connect(avatar.set_mode)
     capri.subtitle.connect(avatar.set_subtitle)
@@ -775,7 +927,7 @@ def main():
         if ok and text.strip():
             capri.text_command(text.strip())
 
-    windows = {}  # открытые окна держим, пока открыты (иначе их соберёт сборщик мусора); одно окно каждого вида
+    windows = {}
 
     def show_window(kind, make):
         old = windows.get(kind)
@@ -809,6 +961,7 @@ def main():
                       ("Спрятать", avatar.vanish),
                       ("MIC", None),
                       ("SEARCH", None),
+                      ("PHONE", None),
                       ("Открыть config.json", lambda: os.startfile(CONFIG_PATH)),
                       ("Капри на GitHub (обновления)…", lambda: capri.actions.web(CAPRI_URL)),
                       (None, None),
@@ -820,7 +973,6 @@ def main():
             mic_menu = menu.addMenu("Микрофон")
 
             def fill_mics(m=mic_menu):
-                """Список устройств ввода строится при каждом открытии — чтобы видеть только что подключённые."""
                 m.clear()
                 chosen = capri.cfg.get("mic_device")
                 options = [(None, f"По умолчанию (как в Windows: {default_input_name()})")]
@@ -840,7 +992,6 @@ def main():
                 m.addAction(tune)
             mic_menu.aboutToShow.connect(fill_mics)
 
-            # «Громкость Капри» — ползунок прямо в меню, чтобы не лезть в микшер громкости Windows
             vol_menu = menu.addMenu("Громкость Капри")
             box = QWidget()
             row = QHBoxLayout(box)
@@ -867,25 +1018,50 @@ def main():
             vol_menu.aboutToShow.connect(sync_volume)
             continue
         if title == "SEARCH":
-            # галочка: открывать ли Google, когда Капри не знает ответа (search_when_unsure)
             search_act = QAction("Искать в браузере, если не знаю", menu)
             search_act.setCheckable(True)
             search_act.toggled.connect(capri.set_search_when_unsure)
             menu.addAction(search_act)
 
-            # галочка: появляется ли Капри сама время от времени (chatter)
             chatter_act = QAction("Появляться самой", menu)
             chatter_act.setCheckable(True)
             chatter_act.toggled.connect(capri.set_chatter)
             menu.addAction(chatter_act)
 
             def sync_search(a=search_act, b=chatter_act):
-                capri.reload_config_if_changed(speak=False)  # могли поменять в config.json руками
+                capri.reload_config_if_changed(speak=False)
                 for act, key, default in ((a, "search_when_unsure", True), (b, "chatter", True)):
                     act.blockSignals(True)
                     act.setChecked(bool(capri.cfg.get(key, default)))
                     act.blockSignals(False)
             menu.aboutToShow.connect(sync_search)
+            continue
+        if title == "PHONE":
+            phone_menu = menu.addMenu("Телефон")
+            remote_act = QAction("Сервер включён", phone_menu)
+            remote_act.setCheckable(True)
+            remote_act.setEnabled(remote is not None)
+            remote_act.toggled.connect(capri.set_remote)
+            phone_menu.addAction(remote_act)
+
+            def sync_remote(a=remote_act):
+                a.blockSignals(True)
+                a.setChecked(bool(capri.cfg.get("remote_enabled", True)))
+                a.blockSignals(False)
+            phone_menu.aboutToShow.connect(sync_remote)
+
+            def show_pairing():
+                token = capri.cfg.get("remote_token") or "(включи сервер — токен создастся сам)"
+                box = QMessageBox()
+                box.setWindowTitle("Капри — подключение телефона")
+                box.setText(f"IP: {remote.local_ip() if remote else '?'}\n"
+                            f"Порт: {capri.cfg.get('remote_port', 5000)}\n"
+                            f"Токен: {token}")
+                box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                box.exec()
+            pair_act = QAction("IP и токен для телефона…", phone_menu)
+            pair_act.triggered.connect(show_pairing)
+            phone_menu.addAction(pair_act)
             continue
         act = QAction(title, menu)
         act.triggered.connect(fn)
@@ -899,15 +1075,84 @@ def main():
     tray.show()
     avatar.menu_requested.connect(lambda pos: menu.popup(pos))
 
-    capri.start()
-    capri.start()
-    
-    # 📱 ДОБАВЬ ЭТИ ДВЕ СТРОКИ:
-    threading.Thread(target=phone_command_poller, args=(capri,), daemon=True).start()
-    
-    
-    sys.exit(app.exec())
+    # Капри-остров: музыкальная капсула сверху экрана, связанная с Капри
+    try:
+        from island import attach_island
+        capri.island = attach_island(capri, cfg, BASE)
+    except Exception:
+        log.exception("Остров не запустился")
 
+    # меню острова в трее — скрытый остров всегда можно вернуть отсюда
+    isl = getattr(capri, "island", None)
+    if isl is not None:
+        menu.addSeparator()
+        im = menu.addMenu("Остров")
+
+        act_show = QAction("Показывать остров", im)
+        act_show.setCheckable(True)
+        act_show.toggled.connect(lambda on: isl.apply_setting("enabled", bool(on)))
+        im.addAction(act_show)
+
+        act_exp = QAction("Развернуть плеер", im)
+        act_exp.setCheckable(True)
+        act_exp.toggled.connect(lambda on: setattr(isl, "_expanded", bool(on)))
+        im.addAction(act_exp)
+
+        act_pin = QAction("Не сворачивать сам", im)
+        act_pin.setCheckable(True)
+        act_pin.toggled.connect(lambda on: setattr(isl, "_pinned", bool(on)))
+        im.addAction(act_pin)
+
+        act_bottom = QAction("Снизу экрана", im)
+        act_bottom.setCheckable(True)
+        act_bottom.toggled.connect(lambda on: isl.apply_setting("position", "bottom" if on else "top"))
+        im.addAction(act_bottom)
+
+        act_fs = QAction("Прятать в играх и видео", im)
+        act_fs.setCheckable(True)
+        act_fs.toggled.connect(lambda on: isl.apply_setting("auto_hide_fullscreen", bool(on)))
+        im.addAction(act_fs)
+
+        im.addSeparator()
+
+        def open_island_settings():
+            isl.apply_setting("enabled", True)
+            isl._panel.show_near()
+
+        act_set = QAction("Настройки острова…", im)
+        act_set.triggered.connect(open_island_settings)
+        im.addAction(act_set)
+
+        def restore_island():
+            isl.apply_setting("enabled", True)
+            isl.apply_setting("auto_hide_fullscreen", False)
+            isl._expanded = False
+            isl._pinned = False
+            isl._fullscreen = False
+            isl.show()
+            isl._place()
+            isl.update()
+
+        act_reset = QAction("Вернуть остров на место", im)
+        act_reset.triggered.connect(restore_island)
+        im.addAction(act_reset)
+
+        def sync_island():
+            for a, v in ((act_show, isl.s.get("enabled", True)),
+                         (act_exp, isl._expanded),
+                         (act_pin, isl._pinned),
+                         (act_bottom, isl.s.get("position") == "bottom"),
+                         (act_fs, isl.s.get("auto_hide_fullscreen", True))):
+                a.blockSignals(True)
+                a.setChecked(bool(v))
+                a.blockSignals(False)
+        im.aboutToShow.connect(sync_island)
+
+    capri.start()
+    if cfg.get("remote_enabled"):
+        capri.start_remote()
+
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     try:

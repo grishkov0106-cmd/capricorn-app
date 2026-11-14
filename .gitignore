@@ -5,3 +5,9 @@ build/
 .flet/
 *.pyc
 .env
+config.json
+capri.log
+reports/
+scheduler.json
+island.json
+island_covers/
