@@ -11,3 +11,8 @@ reports/
 scheduler.json
 island.json
 island_covers/
+@'
+island_settings_export.json
+island_lyrics/
+'@ | Add-Content .gitignoregit 
+Add-Content .gitignore "main_old.py"

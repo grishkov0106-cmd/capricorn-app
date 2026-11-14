@@ -46,7 +46,7 @@ DEFAULTS = {"enabled": True, "position": "top", "opacity": 0.97, "scale": 1.0, "
             "theme": "cyber", "auto_hide_fullscreen": True, "auto_collapse": True,
             "show_art": True, "online_covers": True, "spectrum": True,
             "dynamic_palette": True, "reactive_glow": True, "peak_hold": True,
-            "compact_play": True, "idle_clock": True, "quick_actions": True,
+            "compact_play": True, "idle_clock": True, "quick_actions": True, "show_clock": True,
             "lyrics": True, "lyrics_in_compact": True, "lyrics_glow": True,
             "use_custom_pos": False, "custom_pos": [0, 0]}
 
@@ -764,6 +764,7 @@ class SettingsPanel(QWidget):
         self._section("ПОВЕДЕНИЕ")
         self._combo("position", "Позиция", [("top", "Сверху"), ("bottom", "Снизу")])
         self._check("idle_clock", "Часы, когда ничего не играет")
+        self._check("show_clock", "Часы и дата всегда на острове")
         self._check("quick_actions", "Быстрые команды Капри")
         self._check("auto_collapse", "Авто-сворачивание")
         self._check("auto_hide_fullscreen", "Прятать в играх и видео")
@@ -1375,6 +1376,24 @@ class Island(QWidget):
             p.drawText(QPointF(rect.x() - off + span, rect.y() + rect.height() * 0.72), text)
         p.restore()
 
+    def _paint_clock(self, p, rect, k=1.0):
+        now = datetime.datetime.now()
+        p.setPen(QPen(self._col("text")))
+        p.setFont(QFont("Consolas", max(9, int(13 * k)), QFont.Bold))
+        p.drawText(QRectF(rect.x(), rect.y(), rect.width(), rect.height() * 0.55),
+                   Qt.AlignCenter, now.strftime("%H:%M"))
+        p.setPen(QPen(self._col("muted")))
+        p.setFont(QFont("Segoe UI", max(6, int(8 * k)), QFont.Bold))
+        p.drawText(QRectF(rect.x(), rect.y() + rect.height() * 0.5, rect.width(), rect.height() * 0.5),
+                   Qt.AlignCenter, f"{WEEKDAYS[now.weekday()]} {now:%d.%m}")
+
+    def _paint_clock_inline(self, p, rect, k=1.0):
+        now = datetime.datetime.now()
+        p.setPen(QPen(self._col("text")))
+        p.setFont(QFont("Consolas", max(7, int(8 * k)), QFont.Bold))
+        p.drawText(rect, Qt.AlignVCenter | Qt.AlignRight,
+                   f"{now:%H:%M} · {WEEKDAYS[now.weekday()]} {now:%d.%m}")
+
     def _paint_minimal(self, p, w, h):
         self._logo(p, 28, h / 2, 12)
         if self.s.get("idle_clock", True) and self.capri_mode == "idle" and not self.track:
@@ -1396,7 +1415,8 @@ class Island(QWidget):
     def _paint_compact(self, p, w, h):
         self._cover(p, QRectF(12, h / 2 - 24, 44, 44), small=True)
         show_play = self.s.get("compact_play", True) and self.track and self.capri_mode == "idle"
-        right = 130 if show_play else 100
+        show_clock = self.s.get("show_clock", True)
+        right = 22 + (46 + 6 if show_clock else 0) + 40 + 6 + (30 + 6 if show_play else 0)
         tx, tw = 66, w - 66 - right
         lyric = self._current_line() if self.s.get("lyrics_in_compact", True) else ""
         if self._notify and time.time() < self._notify_until:
@@ -1417,11 +1437,16 @@ class Island(QWidget):
         self._marquee_text(p, QRectF(tx, 9, tw, 24), main, QFont("Segoe UI", 10, QFont.Bold))
         p.setFont(QFont("Segoe UI", 8)); p.setPen(QPen(self._col("muted")))
         p.drawText(QRectF(tx, 33, tw, 18), Qt.AlignVCenter | Qt.AlignLeft, sub[:52])
+        cursor = w - 22 - 8
+        if show_clock:
+            self._paint_clock(p, QRectF(cursor - 46, h / 2 - 20, 46, 40), 1.0)
+            cursor -= 46 + 6
+        self._eq(p, cursor - 40, h / 2 - 13, 40, 26, bars=7)
+        cursor -= 40 + 6
         if show_play:
-            r = QRectF(w - 120, h / 2 - 15, 30, 30)
+            r = QRectF(cursor - 30, h / 2 - 15, 30, 30)
             self._rects["play"] = r
             self._round_btn(p, r, "play")
-        self._eq(p, w - 84, h / 2 - 13, 44, 26, bars=7)
         self._dot(p, w - 22, h / 2)
         pos, dur = self._display_pos(), (self.track or {}).get("duration")
         if dur and pos is not None and self.capri_mode == "idle":
@@ -1607,6 +1632,8 @@ class Island(QWidget):
         p.setPen(QPen(self._col("c")))
         p.drawText(badge, Qt.AlignCenter, source[:18].upper())
         self._eq(p, tx, 96 * k, w - tx - 24 * k, 22 * k, bars=12)
+        if self.s.get("show_clock", True):
+            self._paint_clock(p, QRectF(w - 78 * k, 48 * k, 60 * k, 44 * k), k)
         self._rects["pin"] = QRectF(w - 64 * k, 16 * k, 24 * k, 24 * k)
         self._rects["gear"] = QRectF(w - 34 * k, 16 * k, 24 * k, 24 * k)
         self._round_btn(p, self._rects["pin"], "pin")
@@ -1699,9 +1726,12 @@ class Island(QWidget):
         p.setPen(QPen(self._col("muted")))
         src = (self.lyrics or {}).get("source")
         hint = "клик по строке — перемотка" if synced else ("колесо — листать" if plain else "")
-        p.drawText(QRectF(24 * k, 258 * k, w - 48 * k, 14 * k), Qt.AlignVCenter | Qt.AlignLeft,
-                   (src or "").upper())
-        p.drawText(QRectF(24 * k, 258 * k, w - 48 * k, 14 * k), Qt.AlignVCenter | Qt.AlignRight, hint)
+        row = QRectF(24 * k, 258 * k, w - 48 * k, 14 * k)
+        if self.s.get("show_clock", True):
+            self._paint_clock_inline(p, QRectF(w - 150 * k, 258 * k, 126 * k, 14 * k), k)
+            row = QRectF(24 * k, 258 * k, w - 48 * k - 132 * k, 14 * k)
+        p.drawText(row, Qt.AlignVCenter | Qt.AlignLeft, (src or "").upper())
+        p.drawText(row, Qt.AlignVCenter | Qt.AlignRight, hint)
         self._paint_bottom(p, w, k, 140)
 
     def _hit(self, pos):
